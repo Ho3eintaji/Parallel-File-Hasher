@@ -2,7 +2,8 @@
 #include <string>
 #include <vector>
 #include <fstream>
-#include <filesystem> 
+#include <filesystem>
+#include <thread> 
 #include "picosha2.h"
 
 // A helper function to compute the SHA256 hash of a file.
@@ -23,6 +24,16 @@ std::string get_file_hash(const std::filesystem::path& file_path) {
     );
 }
 
+// A function that is the entry point for each thread.
+// It combines getting the hash and printing it.
+void process_and_print_hash(const std::filesystem::path& file_path) {
+    std::string hash = get_file_hash(file_path);
+    
+    // Note: Multiple threads writing to std::cout at the same time can jumble the output.
+    // We will fix this properly with a mutex in a later step. For now, we accept it.
+    std::cout << file_path.filename().string() << ": " << hash << std::endl;
+}
+
 int main(int argc, char* argv[]) {
     // --- 1. Argument Validation ---
     if (argc != 2) {
@@ -38,24 +49,33 @@ int main(int argc, char* argv[]) {
     }
 
     std::cout << "Scanning directory: " << directory_path << std::endl;
+    
+    // --- 2. Create a vector to hold our thread objects ---
+    std::vector<std::thread> threads;
 
-    // --- 2. Directory Iteration and Hashing ---
     try {
-        // Use a directory_iterator to loop through all entries in the given path
+        // --- 3. Launch one thread per file ---
         for (const auto& entry : std::filesystem::directory_iterator(directory_path)) {
-            // Check if the entry is a regular file (i.e., not a directory, symlink, etc.)
             if (entry.is_regular_file()) {
-                std::filesystem::path file_path = entry.path();
-                std::string hash = get_file_hash(file_path);
-
-                // Print the result in a clean format
-                std::cout << file_path.filename().string() << ": " << hash << std::endl;
+                // Create a thread that runs 'process_and_print_hash' with the file path as an argument.
+                // emplace_back is slightly more efficient than push_back as it constructs the thread in place.
+                threads.emplace_back(process_and_print_hash, entry.path());
             }
         }
+        
+        std::cout << "Launched " << threads.size() << " threads to process files." << std::endl;
+
+        // --- 4. Wait for all threads to complete ---
+        // We must join() every thread we create.
+        for (auto& t : threads) {
+            t.join();
+        }
+
     } catch (const std::filesystem::filesystem_error& e) {
         std::cerr << "Filesystem error: " << e.what() << std::endl;
         return 1;
     }
 
+    std::cout << "All files processed." << std::endl;
     return 0;
 }

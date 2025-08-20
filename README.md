@@ -1,15 +1,41 @@
-A C++ command-line tool that takes a directory path and calculates the SHA256 hash for every file inside it, using a pool of worker threads.
+# Parallel File Hasher 📂⚙️
+A command-line utility written in modern C++ to calculate the SHA256 hash of all files within a specified directory, using multithreading to accelerate the process.
 
+## Features
+- Calculates the SHA256 hash for any given file.
+- Scans a directory and processes all regular files within it.
+- Uses C++17 <filesystem> for modern and cross-platform directory traversal.
+- Header-only SHA256 implementation via picosha2.h.
+
+## Requirements
+To build and run this project, you will need:
+- A C++ compiler that supports the C++17 standard (e.g., GCC 7+, Clang 5+, MSVC 2017+).
+- CMake (version 3.16 or higher).
+
+## How to Build
+1. Clone the repository:
 ```bash
-# Create a separate directory for build files
+git clone <your-repository-url>
+cd ParallelFileHasher
+```
+2. Create a build directory:
+```bash
 mkdir build
 cd build
-
-# Configure the project with CMake
+```
+3. Configure the project with CMake:
+```bash
 cmake ..
-
-# Compile the project (on Linux/macOS)
+```
+4. Compile the project:
+```bash
 make
+```
+This will create an executable named file_hasher inside the build directory.
 
-./file_hasher DIRECTORY_PATH
+## How to Run
+Run the executable from within the build directory, providing the path to the directory you want to scan as a command-line argument.
+```bash
+# Example usage:
+./file_hasher ../path/to/your/files
 ```
