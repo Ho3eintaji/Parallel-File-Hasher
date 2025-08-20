@@ -3,8 +3,17 @@
 #include <vector>
 #include <fstream>
 #include <filesystem>
-#include <thread> 
+#include <thread>
+#include <queue>              
+#include <mutex>              
+#include <condition_variable> 
 #include "picosha2.h"
+
+// --- Shared resources for the thread pool ---
+std::queue<std::filesystem::path> file_queue;
+std::mutex queue_mutex;
+std::condition_variable queue_cv;
+bool done_adding_files = false; // A flag to signal when the producer is finished
 
 // A helper function to compute the SHA256 hash of a file.
 // It returns the hash as a hexadecimal string.
@@ -24,56 +33,93 @@ std::string get_file_hash(const std::filesystem::path& file_path) {
     );
 }
 
-// A function that is the entry point for each thread.
-// It combines getting the hash and printing it.
-void process_and_print_hash(const std::filesystem::path& file_path) {
-    std::string hash = get_file_hash(file_path);
-    
-    // Note: Multiple threads writing to std::cout at the same time can jumble the output.
-    // We will fix this properly with a mutex in a later step. For now, we accept it.
-    std::cout << file_path.filename().string() << ": " << hash << std::endl;
+// The function that each worker thread will execute
+void worker() {
+    while (true) {
+        std::filesystem::path file_path;
+
+        // --- Critical Section: Accessing the Queue ---
+        {
+            // Acquire a unique_lock. This is more flexible than lock_guard and is required for condition variables.
+            // The lock is automatically released when 'lock' goes out of scope.
+            std::unique_lock<std::mutex> lock(queue_mutex);
+
+            // Wait on the condition variable. The thread will sleep until:
+            // 1. The queue is NOT empty, OR
+            // 2. The producer is done adding files.
+            // The lambda prevents "spurious wakeups" by re-checking the condition.
+            queue_cv.wait(lock, []{ return !file_queue.empty() || done_adding_files; });
+
+            // If the queue is empty AND the producer is done, there's no more work.
+            if (file_queue.empty() && done_adding_files) {
+                return; // Exit the thread
+            }
+
+            // Pop the next file path from the queue
+            file_path = file_queue.front();
+            file_queue.pop();
+        } // The lock is released here
+
+        // --- Do the work (outside the lock) ---
+        std::string hash = get_file_hash(file_path);
+        // Note: We still have a potential race condition on std::cout.
+        // We will address this in a later step. For now, we focus on the thread pool logic.
+        std::cout << file_path.filename().string() << ": " << hash << std::endl;
+    }
 }
 
 int main(int argc, char* argv[]) {
     // --- 1. Argument Validation ---
     if (argc != 2) {
         std::cerr << "Usage: " << argv[0] << " <directory_path>" << std::endl;
-        return 1; // Indicate error
+        return 1;
     }
-
     std::filesystem::path directory_path = argv[1];
-
     if (!std::filesystem::is_directory(directory_path)) {
         std::cerr << "Error: Provided path '" << directory_path << "' is not a valid directory." << std::endl;
         return 1;
     }
 
-    std::cout << "Scanning directory: " << directory_path << std::endl;
-    
-    // --- 2. Create a vector to hold our thread objects ---
-    std::vector<std::thread> threads;
+    // --- Thread Pool Setup ---
+    // Determine the optimal number of threads, usually the number of hardware cores.
+    const unsigned int num_threads = std::thread::hardware_concurrency();
+    std::cout << "Using " << num_threads << " worker threads." << std::endl;
 
+    std::vector<std::thread> threads;
+    for (unsigned int i = 0; i < num_threads; ++i) {
+        threads.emplace_back(worker);
+    }
+
+    // --- Producer: Add files to the queue ---
     try {
-        // --- 3. Launch one thread per file ---
         for (const auto& entry : std::filesystem::directory_iterator(directory_path)) {
             if (entry.is_regular_file()) {
-                // Create a thread that runs 'process_and_print_hash' with the file path as an argument.
-                // emplace_back is slightly more efficient than push_back as it constructs the thread in place.
-                threads.emplace_back(process_and_print_hash, entry.path());
+                // Lock the queue to safely add a new item
+                std::lock_guard<std::mutex> lock(queue_mutex);
+                file_queue.push(entry.path());
+                
+                // Notify one waiting thread that there's a new item in the queue.
+                queue_cv.notify_one();
             }
         }
-        
-        std::cout << "Launched " << threads.size() << " threads to process files." << std::endl;
-
-        // --- 4. Wait for all threads to complete ---
-        // We must join() every thread we create.
-        for (auto& t : threads) {
-            t.join();
-        }
-
     } catch (const std::filesystem::filesystem_error& e) {
         std::cerr << "Filesystem error: " << e.what() << std::endl;
+        // Clean up and exit
         return 1;
+    }
+
+    // --- Signal that we are done adding files ---
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex);
+        done_adding_files = true;
+    }
+    // Notify ALL waiting threads so they can wake up and check the 'done_adding_files' flag.
+    queue_cv.notify_all();
+
+
+    // --- Join all threads ---
+    for (auto& t : threads) {
+        t.join();
     }
 
     std::cout << "All files processed." << std::endl;
