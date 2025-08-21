@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <atomic>
 #include <algorithm> // For std::find
+#include <unordered_set> // For efficient extension filtering
 #include "picosha2.h"
 
 // --- Shared resources for the thread pool ---
@@ -84,38 +85,41 @@ void worker() {
 
 
 void print_usage(const char* prog_name) {
-    std::cerr << "Usage: " << prog_name << " <directory_path> [-j <num_threads>]" << std::endl;
-    std::cerr << "  -j <num_threads>: Optional. Specify the number of worker threads." << std::endl;
-    std::cerr << "                    Defaults to the number of hardware cores." << std::endl;
+    std::cerr << "Usage: " << prog_name << " <directory_path> [options]" << std::endl;
+    std::cerr << "Options:" << std::endl;
+    std::cerr << "  -j <num_threads>      Specify the number of worker threads. Defaults to hardware cores." << std::endl;
+    std::cerr << "  -r, --recursive       Scan directories recursively." << std::endl;
+    std::cerr << "  --filter .ext1 .ext2  Only process files with the specified extensions." << std::endl;
 }
 
 int main(int argc, char* argv[]) {
     // --- 1. Argument Parsing ---
-    if (argc < 2 || argc > 4) {
+    if (argc < 2) {
         print_usage(argv[0]);
         return 1;
     }
 
-    std::filesystem::path directory_path;
-    unsigned int num_threads = std::thread::hardware_concurrency(); // Default value
-
     std::vector<std::string> args(argv + 1, argv + argc);
-    directory_path = args[0];
+    std::filesystem::path directory_path = args[0];
 
-    auto it = std::find(args.begin(), args.end(), "-j");
-    if (it != args.end() && std::next(it) != args.end()) {
-        try {
-            int n = std::stoi(*std::next(it));
-            if (n > 0) {
-                num_threads = n;
-            } else {
-                std::cerr << "Error: Number of threads must be positive." << std::endl;
-                return 1;
+    // Default values for options
+    unsigned int num_threads = std::thread::hardware_concurrency();
+    bool recursive = false;
+    std::unordered_set<std::string> filters;
+
+    for (size_t i = 1; i < args.size(); ++i) {
+        if (args[i] == "-j" && i + 1 < args.size()) {
+            try {
+                num_threads = std::stoi(args[++i]);
+            } catch (...) { /* ignore malformed input */ }
+        } else if (args[i] == "-r" || args[i] == "--recursive") {
+            recursive = true;
+        } else if (args[i] == "--filter" && i + 1 < args.size()) {
+            // Collect all subsequent arguments as filters until another flag is found
+            while (++i < args.size() && args[i][0] != '-') {
+                filters.insert(args[i]);
             }
-        } catch (const std::invalid_argument& e) {
-            std::cerr << "Error: Invalid number provided for -j flag." << std::endl;
-            print_usage(argv[0]);
-            return 1;
+            --i; // Decrement because the outer loop will increment it
         }
     }
 
@@ -124,27 +128,41 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    // --- Pre-scan to count files ---
+    // --- 2. File Discovery ---
     std::vector<std::filesystem::path> files_to_process;
+    std::cout << "Scanning for files..." << std::endl;
     try {
-        for (const auto& entry : std::filesystem::directory_iterator(directory_path)) {
-            if (entry.is_regular_file()) {
-                files_to_process.push_back(entry.path());
+        if (recursive) {
+            for (const auto& entry : std::filesystem::recursive_directory_iterator(directory_path)) {
+                if (entry.is_regular_file()) {
+                    // Apply filter if one is provided
+                    if (filters.empty() || filters.count(entry.path().extension().string())) {
+                        files_to_process.push_back(entry.path());
+                    }
+                }
+            }
+        } else {
+            for (const auto& entry : std::filesystem::directory_iterator(directory_path)) {
+                if (entry.is_regular_file()) {
+                     if (filters.empty() || filters.count(entry.path().extension().string())) {
+                        files_to_process.push_back(entry.path());
+                    }
+                }
             }
         }
     } catch (const std::filesystem::filesystem_error& e) {
-        std::cerr << "Filesystem error during pre-scan: " << e.what() << std::endl;
+        std::cerr << "Filesystem error during scan: " << e.what() << std::endl;
         return 1;
     }
 
     total_files = files_to_process.size();
     if (total_files == 0) {
-        std::cout << "No files found in the specified directory." << std::endl;
+        std::cout << "No matching files found to process." << std::endl;
         return 0;
     }
-    std::cout << "Found " << total_files << " files to process." << std::endl;
+    std::cout << "Found " << total_files << " files." << std::endl;
 
-    // --- Thread Pool Setup ---
+    // --- 3. Thread Pool and Processing ---
     std::cout << "Using " << num_threads << " worker threads." << std::endl;
     std::vector<std::thread> threads;
     for (unsigned int i = 0; i < num_threads; ++i) {
