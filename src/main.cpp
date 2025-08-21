@@ -8,16 +8,19 @@
 #include <mutex>
 #include <condition_variable>
 #include <atomic>
+#include <algorithm> // For std::find
 #include "picosha2.h"
 
 // --- Shared resources for the thread pool ---
 std::queue<std::filesystem::path> file_queue;
 std::mutex queue_mutex;
 std::condition_variable queue_cv;
-bool done_adding_files = false; // A flag to signal when the producer is finished
-std::atomic<int> processed_files_count = 0; // Thread-safe counter for progress
-int total_files = 0;                        // Total number of files to process
-std::mutex cout_mutex;                      // Mutex to protect std::cout
+bool done_adding_files = false;
+
+// --- Shared resources for progress and output ---
+std::atomic<int> processed_files_count = 0;
+int total_files = 0;
+std::mutex cout_mutex;
 
 // A helper function to compute the SHA256 hash of a file.
 // It returns the hash as a hexadecimal string.
@@ -79,15 +82,45 @@ void worker() {
     }
 }
 
+
+void print_usage(const char* prog_name) {
+    std::cerr << "Usage: " << prog_name << " <directory_path> [-j <num_threads>]" << std::endl;
+    std::cerr << "  -j <num_threads>: Optional. Specify the number of worker threads." << std::endl;
+    std::cerr << "                    Defaults to the number of hardware cores." << std::endl;
+}
+
 int main(int argc, char* argv[]) {
-    // --- 1. Argument Validation ---
-    if (argc != 2) {
-        std::cerr << "Usage: " << argv[0] << " <directory_path>" << std::endl;
+    // --- 1. Argument Parsing ---
+    if (argc < 2 || argc > 4) {
+        print_usage(argv[0]);
         return 1;
     }
-    std::filesystem::path directory_path = argv[1];
+
+    std::filesystem::path directory_path;
+    unsigned int num_threads = std::thread::hardware_concurrency(); // Default value
+
+    std::vector<std::string> args(argv + 1, argv + argc);
+    directory_path = args[0];
+
+    auto it = std::find(args.begin(), args.end(), "-j");
+    if (it != args.end() && std::next(it) != args.end()) {
+        try {
+            int n = std::stoi(*std::next(it));
+            if (n > 0) {
+                num_threads = n;
+            } else {
+                std::cerr << "Error: Number of threads must be positive." << std::endl;
+                return 1;
+            }
+        } catch (const std::invalid_argument& e) {
+            std::cerr << "Error: Invalid number provided for -j flag." << std::endl;
+            print_usage(argv[0]);
+            return 1;
+        }
+    }
+
     if (!std::filesystem::is_directory(directory_path)) {
-        std::cerr << "Error: Provided path '" << directory_path << "' is not a valid directory." << std::endl;
+        std::cerr << "Error: Provided path '" << directory_path.string() << "' is not a valid directory." << std::endl;
         return 1;
     }
 
@@ -103,6 +136,7 @@ int main(int argc, char* argv[]) {
         std::cerr << "Filesystem error during pre-scan: " << e.what() << std::endl;
         return 1;
     }
+
     total_files = files_to_process.size();
     if (total_files == 0) {
         std::cout << "No files found in the specified directory." << std::endl;
@@ -111,7 +145,6 @@ int main(int argc, char* argv[]) {
     std::cout << "Found " << total_files << " files to process." << std::endl;
 
     // --- Thread Pool Setup ---
-    const unsigned int num_threads = std::thread::hardware_concurrency();
     std::cout << "Using " << num_threads << " worker threads." << std::endl;
     std::vector<std::thread> threads;
     for (unsigned int i = 0; i < num_threads; ++i) {
