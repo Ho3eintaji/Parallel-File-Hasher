@@ -1,3 +1,11 @@
+// ----------------------------------------------------------------------------
+// Parallel File Hasher
+// Author: Hossein Taji
+//
+// A high-performance C++ utility to compute SHA256 hashes for files
+// in a directory tree. It leverages a thread pool for parallel processing.
+// ----------------------------------------------------------------------------
+
 #include <iostream>
 #include <string>
 #include <vector>
@@ -11,14 +19,14 @@
 #include "picosha2.h"
 #include "ThreadPool.h"
 
-// --- Shared resources for progress, output, and results ---
+// Shared resources for progress, output, and results.
 std::atomic<int> processed_files_count = 0;
 int total_files = 0;
 std::mutex cout_mutex;
 std::vector<std::pair<std::filesystem::path, std::string>> results;
 std::mutex results_mutex;
 
-// a standalone, ready to be used in a task.
+// The main task for processing a single file.
 void process_file(const std::filesystem::path& file_path) {
     // 1. Hash the file
     std::ifstream file_stream(file_path, std::ios::binary);
@@ -98,17 +106,16 @@ int main(int argc, char* argv[]) {
     if (total_files == 0) { std::cout << "No matching files found." << std::endl; return 0; }
     std::cout << "Found " << total_files << " files. Starting processing..." << std::endl;
 
-    // --- Use the ThreadPool ---
+    // Create a scope for the ThreadPool to ensure its destructor is called
+    // before we try to print the results.
     {
         ThreadPool pool(num_threads);
         for (const auto& path : files_to_process) {
-            // Enqueue a lambda function as a task.
-            // The lambda captures the 'path' by value to ensure it's valid when the task runs.
             pool.enqueue([path] {
                 process_file(path);
             });
         }
-    } // The ThreadPool destructor is called here.
+    } 
 
     // Final report logic
     std::cout << std::endl;
