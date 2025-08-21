@@ -10,6 +10,7 @@
 #include <atomic>
 #include <algorithm> // For std::find
 #include <unordered_set> // For efficient extension filtering
+#include <utility> // For std::pair
 #include "picosha2.h"
 
 // --- Shared resources for the thread pool ---
@@ -22,6 +23,10 @@ bool done_adding_files = false;
 std::atomic<int> processed_files_count = 0;
 int total_files = 0;
 std::mutex cout_mutex;
+
+// --- Shared resource to store results ---
+std::vector<std::pair<std::filesystem::path, std::string>> results;
+std::mutex results_mutex;
 
 // A helper function to compute the SHA256 hash of a file.
 // It returns the hash as a hexadecimal string.
@@ -45,8 +50,6 @@ std::string get_file_hash(const std::filesystem::path& file_path) {
 void worker() {
     while (true) {
         std::filesystem::path file_path;
-
-        // --- Critical Section: Accessing the Queue ---
         {
             // Acquire a unique_lock. This is more flexible than lock_guard and is required for condition variables.
             // The lock is automatically released when 'lock' goes out of scope.
@@ -60,36 +63,51 @@ void worker() {
 
             // If the queue is empty AND the producer is done, there's no more work.
             if (file_queue.empty() && done_adding_files) {
-                return; // Exit the thread
+                return;
             }
-
             file_path = file_queue.front();
             file_queue.pop();
         } // The lock is released here
 
         // --- Do the work (outside the lock) ---
         std::string hash = get_file_hash(file_path);
-        
-        // Atomically increment the counter. This is thread-safe.
+
+        {
+            std::lock_guard<std::mutex> lock(results_mutex);
+            results.emplace_back(file_path, hash);
+        }
+
         int current_count = ++processed_files_count;
 
-        // --- Critical Section for printing to the console ---
         {
             // Use a lock_guard to ensure only one thread writes to std::cout at a time
             std::lock_guard<std::mutex> lock(cout_mutex);
-            std::cout << "[" << current_count << "/" << total_files << "] "
-                      << file_path.filename().string() << ": " << hash << std::endl;
+            
+            float percentage = static_cast<float>(current_count) / total_files * 100.0f;
+            const int bar_width = 50;
+            int pos = static_cast<int>(bar_width * percentage / 100.0);
+
+            std::cout << "\r[";
+            for (int i = 0; i < bar_width; ++i) {
+                if (i < pos) std::cout << "=";
+                else if (i == pos) std::cout << ">";
+                else std::cout << " ";
+            }
+            std::cout << "] " << static_cast<int>(percentage) << "% (" << current_count << "/" << total_files << ")  ";
+            std::cout << std::flush;
         }
     }
 }
 
 
+// Updated to include the new output option
 void print_usage(const char* prog_name) {
     std::cerr << "Usage: " << prog_name << " <directory_path> [options]" << std::endl;
     std::cerr << "Options:" << std::endl;
     std::cerr << "  -j <num_threads>      Specify the number of worker threads. Defaults to hardware cores." << std::endl;
     std::cerr << "  -r, --recursive       Scan directories recursively." << std::endl;
     std::cerr << "  --filter .ext1 .ext2  Only process files with the specified extensions." << std::endl;
+    std::cerr << "  -o, --output <file>   Write the final hash report to a file instead of the console." << std::endl;
 }
 
 int main(int argc, char* argv[]) {
@@ -103,23 +121,21 @@ int main(int argc, char* argv[]) {
     std::filesystem::path directory_path = args[0];
 
     // Default values for options
+    std::string output_file_path;
     unsigned int num_threads = std::thread::hardware_concurrency();
     bool recursive = false;
     std::unordered_set<std::string> filters;
 
     for (size_t i = 1; i < args.size(); ++i) {
         if (args[i] == "-j" && i + 1 < args.size()) {
-            try {
-                num_threads = std::stoi(args[++i]);
-            } catch (...) { /* ignore malformed input */ }
+            try { num_threads = std::stoi(args[++i]); } catch (...) {}
         } else if (args[i] == "-r" || args[i] == "--recursive") {
             recursive = true;
+        } else if ((args[i] == "-o" || args[i] == "--output") && i + 1 < args.size()) {
+            output_file_path = args[++i];
         } else if (args[i] == "--filter" && i + 1 < args.size()) {
-            // Collect all subsequent arguments as filters until another flag is found
-            while (++i < args.size() && args[i][0] != '-') {
-                filters.insert(args[i]);
-            }
-            --i; // Decrement because the outer loop will increment it
+            while (++i < args.size() && args[i][0] != '-') { filters.insert(args[i]); }
+            --i;
         }
     }
 
@@ -191,6 +207,28 @@ int main(int argc, char* argv[]) {
         t.join();
     }
 
+    std::cout << std::endl;
+
+    // --- final report section ---
+    if (!output_file_path.empty()) {
+        std::cout << "Writing report to " << output_file_path << "..." << std::endl;
+        std::ofstream output_file(output_file_path);
+        if (!output_file.is_open()) {
+            std::cerr << "Error: Could not open output file for writing." << std::endl;
+        } else {
+            for (const auto& pair : results) {
+                output_file << pair.first.string() << ": " << pair.second << std::endl;
+            }
+        }
+    } else {
+        std::cout << "--- Hash Report ---" << std::endl;
+        for (const auto& pair : results) {
+            std::cout << pair.first.string() << ": " << pair.second << std::endl;
+        }
+        std::cout << "-------------------" << std::endl;
+    }
     std::cout << "All files processed." << std::endl;
+
+
     return 0;
 }
